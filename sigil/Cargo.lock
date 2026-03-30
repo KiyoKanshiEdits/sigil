@@ -1245,6 +1245,7 @@ dependencies = [
  "anchor-lang",
  "groth16-solana",
  "proc-macro-crate 3.2.0",
+ "solana-sha256-hasher",
 ]
 
 [[package]]
