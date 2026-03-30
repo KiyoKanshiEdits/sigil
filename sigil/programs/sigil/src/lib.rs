@@ -69,7 +69,7 @@ pub struct IssueVerifiedReceipt<'info> {
         space = VerifiedComputeReceipt::LEN,
         seeds = [
             b"sigil",
-            b"v1".as_ref(),
+            b"v1" as &[u8],
             b"receipt",
             agent.key().as_ref(),
             proposal_id.as_ref(),
@@ -117,6 +117,7 @@ pub mod sigil {
     // ── issue_verified_receipt ────────────────────────────────────────────────
     pub fn issue_verified_receipt(
         ctx: Context<IssueVerifiedReceipt>,
+        proposal_id: [u8; 32],
         proof_a: [u8; 64],
         proof_b: [u8; 128],
         proof_c: [u8; 64],
@@ -125,7 +126,6 @@ pub mod sigil {
         input_hash: [u8; 32],
         output_hash: [u8; 32],
         journal_hash: [u8; 32],
-        proposal_id: [u8; 32],
         position: u8,
     ) -> Result<()> {
 
