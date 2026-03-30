@@ -115,6 +115,14 @@ pub mod sigil {
     
 
     // ── issue_verified_receipt ────────────────────────────────────────────────
+    //
+    // Public input slot layout (Groth16, 5 inputs):
+    //   public_inputs[0] — journal hash commitment
+    //   public_inputs[1] — input hash (committed inputs to scoring function)
+    //   public_inputs[2] — agent pubkey (first 32 bytes)
+    //   public_inputs[3] — proposal ID
+    //   public_inputs[4] — image ID commitment
+    //
     pub fn issue_verified_receipt(
         ctx: Context<IssueVerifiedReceipt>,
         proposal_id: [u8; 32],
@@ -161,6 +169,13 @@ pub mod sigil {
         // public_inputs[0] contains the journal hash commitment
         require!(
             journal_hash == public_inputs[0],
+            SigilError::JournalMismatch
+        );
+
+        // Check 4b — input hash must match public inputs commitment
+        // public_inputs[1] contains the input hash (ZK-attested, not agent-supplied)
+        require!(
+            input_hash == public_inputs[1],
             SigilError::JournalMismatch
         );
 
