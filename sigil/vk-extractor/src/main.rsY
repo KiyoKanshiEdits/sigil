@@ -1,0 +1,9 @@
+fn main() {
+    let vk = risc0_zkvm::groth16::verifier_parameters();
+    let encoded = bincode::serialize(&vk).unwrap();
+    println!("VK length: {} bytes", encoded.len());
+    let hex: String = encoded.iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    println!("VK hex: {}", hex);
+}
