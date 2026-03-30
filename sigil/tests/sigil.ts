@@ -32,8 +32,9 @@ describe("sigil", () => {
   })();
 
   const wrongImageId = Array.from(Buffer.alloc(32, 99));
-  const dummyHash = Array.from(Buffer.alloc(32, 2));
-  const dummyOutputHash = Array.from(Buffer.alloc(32, 3));
+
+  // Empty journal bytes (error path tests hit checks 1-3 before journal decode)
+  const emptyJournal = Buffer.alloc(0);
 
   // Helper to get receipt PDA
   function getReceiptPda(agentKey: PublicKey, propId: number[]): [PublicKey, number] {
@@ -71,7 +72,7 @@ describe("sigil", () => {
           dummyProofA, dummyProofB, dummyProofC,
           dummyPublicInputs,
           wrongImageId,
-          dummyHash, dummyOutputHash, dummyHash,
+          emptyJournal,
           0
         )
         .accounts({
@@ -96,7 +97,7 @@ describe("sigil", () => {
           dummyProofA, dummyProofB, dummyProofC,
           dummyPublicInputs,
           validImageId,
-          dummyHash, dummyOutputHash, dummyHash,
+          emptyJournal,
           2
         )
         .accounts({
@@ -121,7 +122,7 @@ describe("sigil", () => {
           dummyProofA, dummyProofB, dummyProofC,
           dummyPublicInputs,
           validImageId,
-          dummyHash, dummyOutputHash, dummyHash,
+          emptyJournal,
           0
         )
         .accounts({

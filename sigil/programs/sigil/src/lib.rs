@@ -13,22 +13,21 @@ declare_id!("9Jnn4EvBvxfhixwVwbjxaZ3pacHtaKEoAzyRitiseBAV");
 #[account]
 #[derive(Default)]
 pub struct VerifiedComputeReceipt {
-    pub agent: Pubkey,           // 32
-    pub image_id: [u8; 32],      // 32
-    pub input_hash: [u8; 32],    // 32
-    pub output_hash: [u8; 32],   // 32
-    pub journal_hash: [u8; 32],  // 32
-    pub proposal_id: [u8; 32],   // 32
-    pub position: u8,            // 1  — 0=PASS 1=FAIL
-    pub slot: u64,               // 8
-    pub is_settled: bool,        // 1
-    pub proof_type: u8,          // 1  — 0=ZK_ARITHMETIC (v1 only writes 0)
-    pub receipt_hash: [u8; 32],  // 32
+    pub agent: Pubkey,            // 32
+    pub image_id: [u8; 32],       // 32
+    pub journal_digest: [u8; 32], // 32 — SHA-256 of raw journal bytes
+    pub claim_digest: [u8; 32],   // 32 — reconstructed from public_inputs[2..3]
+    pub proposal_id: [u8; 32],    // 32
+    pub position: u8,             // 1  — 0=PASS 1=FAIL
+    pub slot: u64,                // 8
+    pub is_settled: bool,         // 1
+    pub proof_type: u8,           // 1  — 0=ZK_ARITHMETIC (v1 only writes 0)
+    pub receipt_hash: [u8; 32],   // 32
 }
 
 impl VerifiedComputeReceipt {
     // 8 discriminator + fields
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 32 + 32 + 32 + 1 + 8 + 1 + 1 + 32;
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 32 + 32 + 1 + 8 + 1 + 1 + 32;
 }
 
 // ── ERRORS ────────────────────────────────────────────────────────────────────
@@ -41,10 +40,10 @@ pub enum SigilError {
     InvalidPosition,
     #[msg("Groth16 proof verification failed")]
     ProofVerificationFailed,
-    #[msg("Journal hash does not match public inputs commitment")]
+    #[msg("Journal contents do not match expected values")]
     JournalMismatch,
-    #[msg("Output hash is inconsistent with position")]
-    OutputMismatch,
+    #[msg("Failed to decode journal bytes")]
+    JournalDecodeFailed,
     #[msg("Only the original agent can perform this action")]
     UnauthorizedAgent,
     #[msg("Receipt has already been settled")]
@@ -112,16 +111,19 @@ pub struct CloseReceipt<'info> {
 #[program]
 pub mod sigil {
     use super::*;
-    
 
     // ── issue_verified_receipt ────────────────────────────────────────────────
     //
-    // Public input slot layout (Groth16, 5 inputs):
-    //   public_inputs[0] — journal hash commitment
-    //   public_inputs[1] — input hash (committed inputs to scoring function)
-    //   public_inputs[2] — agent pubkey (first 32 bytes)
-    //   public_inputs[3] — proposal ID
-    //   public_inputs[4] — image ID commitment
+    // RISC Zero Groth16 public input layout (5 × BN254 field elements):
+    //   public_inputs[0] — low  128 bits of control_root
+    //   public_inputs[1] — high 128 bits of control_root
+    //   public_inputs[2] — low  128 bits of claim_digest
+    //   public_inputs[3] — high 128 bits of claim_digest
+    //   public_inputs[4] — BN254 identity control ID
+    //
+    // The claim_digest commits to the image ID and journal contents.
+    // Journal bytes are decoded on-chain to verify semantic fields
+    // (agent, proposal_id, position) match the instruction arguments.
     //
     pub fn issue_verified_receipt(
         ctx: Context<IssueVerifiedReceipt>,
@@ -131,9 +133,7 @@ pub mod sigil {
         proof_c: [u8; 64],
         public_inputs: [[u8; 32]; 5],
         image_id: [u8; 32],
-        input_hash: [u8; 32],
-        output_hash: [u8; 32],
-        journal_hash: [u8; 32],
+        journal_bytes: Vec<u8>,
         position: u8,
     ) -> Result<()> {
 
@@ -165,24 +165,45 @@ pub mod sigil {
         verifier.verify()
             .map_err(|_| SigilError::ProofVerificationFailed)?;
 
-        // Check 4 — journal hash must match public inputs commitment
-        // public_inputs[0] contains the journal hash commitment
+        // Check 4 — decode and verify journal contents
+        //
+        // risc0 env::commit() serializes ScoringOutput using risc0's custom
+        // word-aligned format: each u8 is stored as a u32 LE word (4 bytes),
+        // u32 values are stored as u32 LE words.
+        //
+        // ScoringOutput layout in journal:
+        //   agent_pubkey: [u8; 32] → 32 × 4 = 128 bytes
+        //   proposal_id:  [u8; 32] → 32 × 4 = 128 bytes
+        //   position:     u8       → 1 × 4  = 4 bytes
+        //   score:        u32      → 1 × 4  = 4 bytes
+        //   Total:                            264 bytes
+        let (journal_agent, journal_proposal, journal_position, _journal_score) =
+            decode_scoring_journal(&journal_bytes)
+                .ok_or(SigilError::JournalDecodeFailed)?;
+
+        // Check 4a — journal agent must match transaction signer
         require!(
-            journal_hash == public_inputs[0],
+            journal_agent == ctx.accounts.agent.key().to_bytes(),
             SigilError::JournalMismatch
         );
 
-        // Check 4b — input hash must match public inputs commitment
-        // public_inputs[1] contains the input hash (ZK-attested, not agent-supplied)
+        // Check 4b — journal proposal must match instruction arg
         require!(
-            input_hash == public_inputs[1],
+            journal_proposal == proposal_id,
             SigilError::JournalMismatch
         );
 
-        // Check 5 — output hash must be consistent with position
-        // We derive expected output hash from position and verify it matches
-        let expected_output = derive_output_hash(&position, &proposal_id);
-        require!(output_hash == expected_output, SigilError::OutputMismatch);
+        // Check 4c — journal position must match instruction arg
+        require!(
+            journal_position == position,
+            SigilError::JournalMismatch
+        );
+
+        // Compute journal digest (SHA-256 of raw journal bytes)
+        let journal_digest = hashv(&[&journal_bytes]).to_bytes();
+
+        // Reconstruct claim_digest from public_inputs[2..3]
+        let claim_digest = reconstruct_digest(&public_inputs[2], &public_inputs[3]);
 
         // All checks passed — write receipt
         let receipt = &mut ctx.accounts.receipt;
@@ -190,9 +211,8 @@ pub mod sigil {
 
         receipt.agent = ctx.accounts.agent.key();
         receipt.image_id = image_id;
-        receipt.input_hash = input_hash;
-        receipt.output_hash = output_hash;
-        receipt.journal_hash = journal_hash;
+        receipt.journal_digest = journal_digest;
+        receipt.claim_digest = claim_digest;
         receipt.proposal_id = proposal_id;
         receipt.position = position;
         receipt.slot = clock.slot;
@@ -245,19 +265,52 @@ fn image_id_to_bytes(id: &[u32; 8]) -> [u8; 32] {
     out
 }
 
-fn derive_output_hash(position: &u8, proposal_id: &[u8; 32]) -> [u8; 32] {
-    let pos_bytes = [*position];
-    let result = hashv(&[b"sigil_output_v1", pos_bytes.as_ref(), proposal_id.as_ref()]);
-    result.to_bytes()
+/// Decode ScoringOutput from risc0 journal bytes.
+///
+/// risc0 env::commit() uses a custom word-aligned serialization:
+/// each u8 occupies a full u32 LE word (4 bytes), u32 values occupy one u32 LE word.
+///
+/// Returns (agent_pubkey, proposal_id, position, score).
+fn decode_scoring_journal(data: &[u8]) -> Option<([u8; 32], [u8; 32], u8, u32)> {
+    const EXPECTED_LEN: usize = 32 * 4 + 32 * 4 + 4 + 4; // 264 bytes
+    if data.len() < EXPECTED_LEN {
+        return None;
+    }
+
+    let mut agent = [0u8; 32];
+    for i in 0..32 {
+        agent[i] = data[i * 4]; // low byte of each u32 LE word
+    }
+
+    let mut proposal = [0u8; 32];
+    for i in 0..32 {
+        proposal[i] = data[128 + i * 4]; // offset 128 = 32 * 4
+    }
+
+    let position = data[256]; // offset 256 = 128 + 128
+    let score = u32::from_le_bytes([data[260], data[261], data[262], data[263]]);
+
+    Some((agent, proposal, position, score))
+}
+
+/// Reconstruct a 32-byte digest from two split public input halves.
+///
+/// risc0 splits digests into two BN254 field elements (128 bits each, big-endian,
+/// zero-padded to 32 bytes). pi_low contains the low 128 bits at bytes [16..32],
+/// pi_high contains the high 128 bits at bytes [16..32].
+fn reconstruct_digest(pi_low: &[u8; 32], pi_high: &[u8; 32]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    digest[0..16].copy_from_slice(&pi_high[16..32]); // high 128 bits
+    digest[16..32].copy_from_slice(&pi_low[16..32]); // low 128 bits
+    digest // big-endian representation
 }
 
 fn compute_receipt_hash(receipt: &VerifiedComputeReceipt) -> [u8; 32] {
     let result = hashv(&[
         receipt.agent.as_ref(),
         &receipt.image_id,
-        &receipt.input_hash,
-        &receipt.output_hash,
-        &receipt.journal_hash,
+        &receipt.journal_digest,
+        &receipt.claim_digest,
         &receipt.proposal_id,
         &[receipt.position],
         &receipt.slot.to_le_bytes(),
