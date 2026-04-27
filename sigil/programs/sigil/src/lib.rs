@@ -145,6 +145,11 @@ pub mod sigil {
         require!(position <= 1, SigilError::InvalidPosition);
 
         // Check 3 — Groth16 proof must verify
+        //
+        // groth16-solana expects proof_a to be the negated G1 point (-A),
+        // but risc0's seal provides the non-negated A. Negate on-chain.
+        let proof_a_neg = negate_g1_be(&proof_a);
+
         let vk = Groth16Verifyingkey {
             nr_pubinputs: 5,
             vk_alpha_g1: VK_ALPHA_G1,
@@ -155,7 +160,7 @@ pub mod sigil {
         };
 
         let mut verifier = Groth16Verifier::new(
-            &proof_a,
+            &proof_a_neg,
             &proof_b,
             &proof_c,
             &public_inputs,
@@ -255,6 +260,40 @@ pub mod sigil {
 }
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
+
+/// Negate a BN254 G1 point (big-endian) by computing -y = Fq - y.
+///
+/// groth16-solana's pairing equation uses e(-A, B), so proof_a must be negated.
+/// risc0's Groth16 seal provides the non-negated A point.
+///
+/// BN254 base field (Fq) modulus:
+/// 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+fn negate_g1_be(point: &[u8; 64]) -> [u8; 64] {
+    const FQ: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
+        0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+        0x97, 0x81, 0x6a, 0x91, 0x68, 0x71, 0xca, 0x8d,
+        0x3c, 0x20, 0x8c, 0x16, 0xd8, 0x7c, 0xfd, 0x47,
+    ];
+
+    let mut result = [0u8; 64];
+    result[..32].copy_from_slice(&point[..32]); // x unchanged
+
+    // Check if y is zero (point at infinity)
+    if point[32..64].iter().all(|&b| b == 0) {
+        return result;
+    }
+
+    // Compute Fq - y with big-endian borrow chain
+    let mut borrow: u16 = 0;
+    for i in (0..32).rev() {
+        let sub = (FQ[i] as u16).wrapping_sub(point[32 + i] as u16).wrapping_sub(borrow);
+        result[32 + i] = sub as u8;
+        borrow = if sub > 0xFF { 1 } else { 0 };
+    }
+
+    result
+}
 
 fn image_id_to_bytes(id: &[u32; 8]) -> [u8; 32] {
     let mut out = [0u8; 32];
