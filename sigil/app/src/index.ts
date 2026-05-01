@@ -1,3 +1,4 @@
+import { fetchMetaDAOProposals } from "./metadao";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { execSync } from "child_process";
@@ -193,7 +194,7 @@ async function main() {
   console.log("Ready. Processing proposals...\n");
 
   // Get proposals (mock for now — replace with live MetaDAO feed)
-  const proposals = getMockProposals();
+  const proposals = await fetchMetaDAOProposals(RPC_URL);
 
   for (const proposal of proposals) {
     console.log(`Processing: ${proposal.title}`);
